@@ -1,0 +1,32 @@
+# Large files — NOT in Docker image
+models/
+data/
+VieNeu-TTS/
+2/
+
+# Build artifacts
+web/frontend/node_modules/
+web/frontend/dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Brain / docs
+.brain/
+docs/
+plans/
+*.md
+!web/backend/requirements.txt
+
+# Env
+.env
+*.log
+*.swp

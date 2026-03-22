@@ -1,0 +1,86 @@
+# ============================================================
+# VieNeu TTS — Docker Compose
+# GPU-enabled deployment with PostgreSQL
+# ============================================================
+# 
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose logs -f app    # View app logs
+#   docker compose down           # Stop all
+#
+# First run (download models):
+#   docker compose run --rm app python3 scripts/download_models.py
+# ============================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vietneu_tts
+      POSTGRES_USER: vietneu
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-vietneu}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vietneu -d vietneu_tts"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8889}:8889"
+    environment:
+      # Database (points to 'db' service via Docker network)
+      DATABASE_URL: postgresql+asyncpg://vietneu:${DB_PASSWORD:-vietneu}@db:5432/vietneu_tts
+      ALEMBIC_DATABASE_URL: postgresql+asyncpg://vietneu:${DB_PASSWORD:-vietneu}@db:5432/vietneu_tts
+
+      # Auth
+      SECRET_KEY: ${SECRET_KEY:-vieneu-tts-change-me-in-production}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${TOKEN_EXPIRE:-1440}
+
+      # Admin (created on first run)
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@vietneu.io}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+
+      # VieNeu SDK
+      VIENEU_MODE: standard
+      VIENEU_BACKBONE_REPO: pnnbao-ump/VieNeu-TTS
+      VIENEU_CODEC_REPO: neuphonic/distill-neucodec
+
+      # Training
+      TRAINING_GPU_ID: ${TRAINING_GPU_ID:-0}
+      TRAINING_MAX_STEPS: ${TRAINING_MAX_STEPS:-5000}
+      TRAINING_BASE_MODEL: pnnbao-ump/VieNeu-TTS-0.3B
+
+      # Storage
+      STORAGE_PATH: /app/data
+      HF_HOME: /app/models
+
+      # App
+      PORT: ${APP_PORT:-8889}
+      DEBUG: ${DEBUG:-false}
+    volumes:
+      - ./models:/app/models        # HuggingFace model cache (11GB)
+      - ./data:/app/data             # User data, recordings, outputs, training
+      - ./VieNeu-TTS:/app/VieNeu-TTS # Finetune scripts (optional, for training)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  pgdata:

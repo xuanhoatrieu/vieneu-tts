@@ -1,0 +1,40 @@
+# Models — downloaded from HuggingFace (11GB)
+models/
+
+# User data — recordings, refs, outputs, training checkpoints
+data/
+
+# VieNeu TTS finetune source (8.3GB) — cloned separately
+VieNeu-TTS/
+
+# Imported recordings
+2/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Node
+web/frontend/node_modules/
+web/frontend/dist/
+
+# Environment
+.env
+web/backend/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+/tmp/
+
+# Brain (local dev context)
+.brain/
+
+# Docker volumes
+pgdata/
