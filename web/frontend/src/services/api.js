@@ -74,7 +74,8 @@ class ApiService {
   synthesize(body)      { return this.request('/tts/synthesize', { method: 'POST', body: JSON.stringify(body) }); }
   synthesizeWithRef(body){ return this.request('/tts/synthesize-with-ref', { method: 'POST', body: JSON.stringify(body) }); }
   synthesizeCustom(fd)  { return this.upload('/tts/synthesize-custom', fd); }
-  synthesizeTrained(body){ return this.request('/tts/synthesize-trained', { method: 'POST', body: JSON.stringify(body), timeoutMs: 600000 }); }
+  synthesizeTrained(body){ return this.post('/tts/synthesize-trained', body); }
+  pollTrainedJob(jobId)  { return this.get(`/tts/synthesize-trained/${jobId}`); }
   getAudioUrl(filename) { return `${API_BASE}/tts/audio/${filename}`; }
   getTTSModels()        { return this.get('/tts/models'); }
   switchTTSModel(repo)  { return this.post('/tts/models/switch', { repo }); }

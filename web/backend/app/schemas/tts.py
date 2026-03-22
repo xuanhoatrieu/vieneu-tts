@@ -38,6 +38,17 @@ class SynthesizeResponse(BaseModel):
     history_id: uuid.UUID | None = None
 
 
+class TrainedSynthesisJobResponse(BaseModel):
+    """Response for async trained voice synthesis job."""
+    job_id: str
+    status: str  # queued, processing, completed, failed
+    audio_url: str | None = None
+    audio_file: str | None = None
+    duration_sec: float | None = None
+    processing_time_sec: float | None = None
+    error: str | None = None
+
+
 class VoicePresetResponse(BaseModel):
     """Available preset voice."""
     id: str

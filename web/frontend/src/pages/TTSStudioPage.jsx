@@ -70,9 +70,32 @@ export default function TTSStudioPage() {
           setLoading(false);
           return;
         }
-        toast.loading('⏳ Đang xử lý (có thể mất vài phút)...', { id: 'trained-synth' });
-        data = await api.synthesizeTrained({ text, trained_voice_id: voiceId });
-        toast.dismiss('trained-synth');
+        // Job-based polling to avoid Cloudflare 524 timeout
+        const job = await api.synthesizeTrained({ text, trained_voice_id: voiceId });
+        toast.loading('⏳ Đang xử lý...', { id: 'trained-synth' });
+        // Poll every 3 seconds
+        data = await new Promise((resolve, reject) => {
+          const poll = setInterval(async () => {
+            try {
+              const status = await api.pollTrainedJob(job.job_id);
+              if (status.status === 'processing') {
+                toast.loading(`⏳ ${status.error || 'Đang xử lý...'}`, { id: 'trained-synth' });
+              } else if (status.status === 'completed') {
+                clearInterval(poll);
+                toast.dismiss('trained-synth');
+                resolve(status);
+              } else if (status.status === 'failed') {
+                clearInterval(poll);
+                toast.dismiss('trained-synth');
+                reject(new Error(status.error || 'Synthesis failed'));
+              }
+            } catch (e) {
+              clearInterval(poll);
+              toast.dismiss('trained-synth');
+              reject(e);
+            }
+          }, 3000);
+        });
       }
       if (data?.audio_file) {
         setAudioUrl(api.getAudioUrl(data.audio_file));

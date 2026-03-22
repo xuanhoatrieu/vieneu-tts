@@ -6,6 +6,8 @@ import uuid
 import time
 import shutil
 import tempfile
+import threading
+import asyncio
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -20,6 +22,7 @@ from app.schemas.tts import (
     SynthesizeWithRefRequest,
     SynthesizeWithTrainedVoiceRequest,
     SynthesizeResponse,
+    TrainedSynthesisJobResponse,
     VoicePresetResponse,
 )
 from app.services.tts_service import tts_service, AVAILABLE_MODELS
@@ -27,6 +30,10 @@ from app.models.training import TrainedVoice
 from sqlalchemy import select
 
 router = APIRouter()
+
+# ─── In-memory job store for trained voice synthesis ───
+# Avoids Cloudflare 524 timeout by returning immediately and polling for results
+_synthesis_jobs: dict[str, dict] = {}
 
 
 @router.get("/models")
@@ -195,12 +202,13 @@ async def synthesize_custom(
     )
 
 
-@router.post("/synthesize-trained", response_model=SynthesizeResponse)
+@router.post("/synthesize-trained", response_model=TrainedSynthesisJobResponse)
 async def synthesize_with_trained_voice(
     body: SynthesizeWithTrainedVoiceRequest, user: CurrentUser, db: DBSession,
 ):
-    """Synthesize speech using a LoRA-finetuned trained voice."""
-    import asyncio
+    """Start async trained voice synthesis. Returns job_id immediately.
+    Poll GET /synthesize-trained/{job_id} for results.
+    This avoids Cloudflare 524 timeout (100s limit)."""
 
     # Get user's trained voice
     result = await db.execute(
@@ -217,48 +225,98 @@ async def synthesize_with_trained_voice(
     if not voice.checkpoint_path or not os.path.isdir(voice.checkpoint_path):
         raise HTTPException(status_code=400, detail="Checkpoint không tồn tại hoặc đã bị xóa")
 
-    # Auto-switch model if needed AND synthesize — all in one thread to avoid race conditions
-    def _do_trained_synthesis():
-        # Step 1: Wait for any startup model loading to finish
-        switch_err = tts_service.ensure_model_for_trained_voice(voice.base_model_repo)
-        if switch_err:
-            raise RuntimeError(switch_err)
-        # Step 2: Synthesize with LoRA
-        return tts_service.synthesize_with_trained_voice(
-            text=body.text,
-            checkpoint_path=voice.checkpoint_path,
-            ref_audio_path=voice.ref_audio_path,
-            ref_text=voice.ref_text,
+    # Create job
+    job_id = str(uuid.uuid4())[:8]
+    _synthesis_jobs[job_id] = {
+        "status": "processing",
+        "user_id": str(user.id),
+        "voice_name": voice.name,
+        "text": body.text,
+        "started_at": time.time(),
+    }
+
+    # Run synthesis in background thread (fire-and-forget)
+    def _background_synthesis():
+        try:
+            # Step 1: Ensure correct GPU model
+            switch_err = tts_service.ensure_model_for_trained_voice(voice.base_model_repo)
+            if switch_err:
+                _synthesis_jobs[job_id]["status"] = "failed"
+                _synthesis_jobs[job_id]["error"] = switch_err
+                return
+
+            # Step 2: Synthesize with LoRA
+            output_path, duration, elapsed = tts_service.synthesize_with_trained_voice(
+                text=body.text,
+                checkpoint_path=voice.checkpoint_path,
+                ref_audio_path=voice.ref_audio_path,
+                ref_text=voice.ref_text,
+            )
+
+            filename = os.path.basename(output_path)
+            _synthesis_jobs[job_id].update({
+                "status": "completed",
+                "audio_url": f"/api/v1/tts/audio/{filename}",
+                "audio_file": filename,
+                "duration_sec": duration,
+                "processing_time_sec": round(elapsed, 2),
+                "output_path": output_path,
+            })
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            _synthesis_jobs[job_id]["status"] = "failed"
+            _synthesis_jobs[job_id]["error"] = str(e)
+
+    threading.Thread(target=_background_synthesis, daemon=True).start()
+
+    return TrainedSynthesisJobResponse(job_id=job_id, status="processing")
+
+
+@router.get("/synthesize-trained/{job_id}", response_model=TrainedSynthesisJobResponse)
+async def poll_trained_synthesis(job_id: str, user: CurrentUser, db: DBSession):
+    """Poll for trained voice synthesis job status."""
+    job = _synthesis_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Verify ownership
+    if job["user_id"] != str(user.id):
+        raise HTTPException(status_code=403, detail="Not your job")
+
+    if job["status"] == "completed":
+        # Save to audio history on first completion poll
+        if not job.get("history_saved"):
+            history = AudioHistory(
+                user_id=user.id,
+                voice_preset=f"trained:{job['voice_name']}",
+                input_text=job["text"],
+                audio_path=job["output_path"],
+                duration_sec=job["duration_sec"],
+                model_mode="trained",
+                processing_time_sec=job["processing_time_sec"],
+            )
+            db.add(history)
+            await db.commit()
+            job["history_saved"] = True
+
+        return TrainedSynthesisJobResponse(
+            job_id=job_id,
+            status="completed",
+            audio_url=job["audio_url"],
+            audio_file=job["audio_file"],
+            duration_sec=job["duration_sec"],
+            processing_time_sec=job["processing_time_sec"],
         )
-
-    try:
-        output_path, duration, elapsed = await asyncio.to_thread(_do_trained_synthesis)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
-
-    # Save to history
-    history = AudioHistory(
-        user_id=user.id,
-        voice_preset=f"trained:{voice.name}",
-        input_text=body.text,
-        audio_path=output_path,
-        duration_sec=duration,
-        model_mode="trained",
-        processing_time_sec=elapsed,
-    )
-    db.add(history)
-    await db.commit()
-    await db.refresh(history)
-
-    filename = os.path.basename(output_path)
-    return SynthesizeResponse(
-        audio_url=f"/api/v1/tts/audio/{filename}",
-        audio_file=filename,
-        duration_sec=duration,
-        processing_time_sec=round(elapsed, 2),
-        history_id=history.id,
-    )
+    elif job["status"] == "failed":
+        return TrainedSynthesisJobResponse(
+            job_id=job_id, status="failed", error=job.get("error", "Unknown error"),
+        )
+    else:
+        elapsed = round(time.time() - job["started_at"])
+        return TrainedSynthesisJobResponse(
+            job_id=job_id, status="processing",
+            error=f"Đang xử lý... ({elapsed}s)",
+        )
 
 
 @router.get("/trained-voices")
