@@ -369,24 +369,35 @@ class TTSService:
                 except Exception:
                     pass
 
-            # Load LoRA adapter
+            # Load LoRA adapter (also loads voices.json from checkpoint dir)
             print(f"🔄 Loading LoRA adapter: {checkpoint_path}")
             self.tts.load_lora_adapter(checkpoint_path)
 
             # Build inference kwargs
             kwargs = {"text": text}
-            if ref_audio_path and os.path.exists(ref_audio_path):
-                kwargs["ref_audio"] = ref_audio_path
-                kwargs["ref_text"] = ref_text or ""
-                print(f"   📎 Using ref audio: {os.path.basename(ref_audio_path)}")
-            elif voice_id:
-                try:
-                    kwargs["voice"] = self.tts.get_preset_voice(voice_id)
-                except Exception:
-                    pass
+
+            # Priority: use pre-encoded voice from voices.json (loaded by load_lora_adapter)
+            # This gives much better quality than re-encoding raw ref_audio each time
+            try:
+                voices = self.tts.list_preset_voices()
+                if voices:
+                    # Use the first available voice from the checkpoint's voices.json
+                    voice_name = voices[0][1]  # (description, voice_id)
+                    kwargs["voice"] = self.tts.get_preset_voice(voice_name)
+                    print(f"   🎯 Using pre-encoded voice from voices.json: {voice_name}")
+                elif ref_audio_path and os.path.exists(ref_audio_path):
+                    # Fallback: re-encode ref audio (lower quality, backward compat)
+                    kwargs["ref_audio"] = ref_audio_path
+                    kwargs["ref_text"] = ref_text or ""
+                    print(f"   ⚠️ No voices.json, falling back to ref audio: {os.path.basename(ref_audio_path)}")
+            except Exception as e:
+                # Last resort fallback
+                if ref_audio_path and os.path.exists(ref_audio_path):
+                    kwargs["ref_audio"] = ref_audio_path
+                    kwargs["ref_text"] = ref_text or ""
+                    print(f"   ⚠️ Error loading voice preset ({e}), using ref audio")
 
             # SDK handles text splitting internally (max_chars=256)
-            # No need for manual chunking!
             print(f"   📝 Text length: {len(text)} chars")
             audio = self.tts.infer(**kwargs)
             self.tts.save(audio, output_path)
@@ -395,7 +406,9 @@ class TTSService:
             # Always unload adapter after inference
             try:
                 self.tts.unload_lora_adapter()
-                print(f"✅ LoRA adapter unloaded")
+                # Reload original model voices (preset voices cleared by load_lora_adapter)
+                self.tts._load_voices(self._current_model)
+                print(f"✅ LoRA adapter unloaded, preset voices restored")
             except Exception as e:
                 print(f"⚠️ Failed to unload LoRA adapter: {e}")
 

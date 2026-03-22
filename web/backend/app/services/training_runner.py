@@ -285,10 +285,12 @@ print(f"Training complete. Saved to: {{save_path}}")
         async with async_session() as db:
             await _update_request(db, request_id, progress=90)
 
-        # ── Step 5: Create trained_voice record (90→100%) ──
+        # ── Step 4.5: Create voices.json for the checkpoint ──
+        # This is CRITICAL for quality: load_lora_adapter() loads voices.json
+        # to provide pre-encoded NeuCodec reference → consistent with training
+        print(f"🔄 [{request_id}] Step 4.5: Creating voices.json from ref audio...")
         final_checkpoint = os.path.join(checkpoint_dir, "final")
         if not os.path.isdir(final_checkpoint):
-            # Fallback to the checkpoint dir itself
             final_checkpoint = checkpoint_dir
 
         # Pick best ref audio from training recordings (3-15s, longest)
@@ -318,7 +320,6 @@ print(f"Training complete. Saved to: {{save_path}}")
                         best_ref_text = sent.text if sent else ""
                         best_ref_duration = dur
                         break
-                # Fallback: take any recording if none in 3-15s range
                 if not best_ref_path:
                     rec_result2 = await db.execute(
                         select(Recording).where(
@@ -335,8 +336,55 @@ print(f"Training complete. Saved to: {{save_path}}")
                         best_ref_path = rec.file_path
                         best_ref_text = sent.text if sent else ""
 
+        # Encode ref audio → voices.json
         if best_ref_path:
-            print(f"   📎 Best ref audio: {os.path.basename(best_ref_path)} ({best_ref_duration:.1f}s)")
+            voices_json_script = f"""
+import os, json, sys
+os.environ['HF_HOME'] = '{os.path.join(os.path.dirname(VIENEU_TTS_ROOT), "models")}'
+sys.path.insert(0, '{VIENEU_TTS_ROOT}')
+sys.path.insert(0, os.path.join('{VIENEU_TTS_ROOT}', 'src'))
+
+from vieneu.standard import VieNeuTTS
+tts = VieNeuTTS(
+    backbone_repo='{base_model}',
+    backbone_device='cuda:0',
+    codec_repo='neuphonic/distill-neucodec',
+    codec_device='cuda:0'
+)
+ref_codes = tts.encode_reference('{best_ref_path}')
+codes_list = ref_codes.cpu().numpy().flatten().tolist()
+
+voices_data = {{
+    "meta": {{"spec": "vieneu.voice.presets", "spec_version": "1.0", "engine": "VieNeu-TTS"}},
+    "default_voice": "trained_voice",
+    "presets": {{
+        "trained_voice": {{
+            "codes": codes_list,
+            "text": '''{best_ref_text}''',
+            "description": "LoRA trained voice"
+        }}
+    }}
+}}
+
+voices_path = os.path.join('{final_checkpoint}', 'voices.json')
+with open(voices_path, 'w', encoding='utf-8') as f:
+    json.dump(voices_data, f, ensure_ascii=False)
+print(f"Created voices.json: {{len(codes_list)}} codes")
+"""
+            ok, stdout, stderr = await asyncio.to_thread(
+                _run_script,
+                [sys.executable, "-c", voices_json_script],
+                cwd=VIENEU_TTS_ROOT, env=env,
+            )
+            if ok:
+                print(f"   ✅ voices.json created! {stdout.strip()}")
+            else:
+                print(f"   ⚠️ voices.json creation failed (non-critical): {stderr[-200:]}")
+        else:
+            print(f"   ⚠️ No ref audio found, skipping voices.json creation")
+
+        # ── Step 5: Create trained_voice record (95→100%) ──
+        # best_ref_path and best_ref_text already set in Step 4.5
 
         async with async_session() as db:
             trained_voice = TrainedVoice(
