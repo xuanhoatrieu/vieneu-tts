@@ -147,7 +147,12 @@ class TTSService:
         import time as _t
         mode = settings.VIENEU_MODE
         t0 = _t.time()
-        print(f"🔄 Loading model: {backbone_repo} (mode={mode})...")
+
+        # Determine device: GPU models → cuda:0, GGUF models → cpu
+        model_info = next((m for m in AVAILABLE_MODELS if m["repo"] == backbone_repo), None)
+        is_gpu_model = model_info and model_info.get("device") == "gpu"
+        device = "cuda:0" if is_gpu_model else "cpu"
+        print(f"🔄 Loading model: {backbone_repo} (mode={mode}, device={device})...")
 
         if mode == "remote":
             from vieneu.remote import RemoteVieNeuTTS
@@ -165,13 +170,15 @@ class TTSService:
             from vieneu.standard import VieNeuTTS
             self._tts = VieNeuTTS(
                 backbone_repo=backbone_repo,
+                backbone_device=device,
                 codec_repo=settings.VIENEU_CODEC_REPO,
+                codec_device=device,
             )
 
         elapsed = _t.time() - t0
         self._current_model = backbone_repo
         self._initialized = True
-        print(f"🧠 VieNeu TTS loaded: {backbone_repo} in {elapsed:.1f}s (mode={mode})")
+        print(f"🧠 VieNeu TTS loaded: {backbone_repo} on {device} in {elapsed:.1f}s (mode={mode})")
 
     def switch_model(self, backbone_repo: str):
         """Switch to a different backbone model asynchronously."""
@@ -334,58 +341,17 @@ class TTSService:
             print(f"⚠️ Failed to encode reference: {e}")
             return None
 
-    @staticmethod
-    def _split_text_to_chunks(text: str, max_chars: int = 150) -> list[str]:
-        """Split long text into sentence-level chunks for faster synthesis.
-        TTS models have super-linear time complexity — processing 4 short chunks
-        is much faster than 1 long chunk of the same total length.
-        """
-        import re
-        # Split by sentence boundaries
-        sentences = re.split(r'(?<=[.!?;:。！？])\s+', text.strip())
-        chunks = []
-        current = ""
-        for s in sentences:
-            if not s.strip():
-                continue
-            # If adding this sentence would exceed max_chars, flush current
-            if current and len(current) + len(s) + 1 > max_chars:
-                chunks.append(current.strip())
-                current = s
-            else:
-                current = f"{current} {s}".strip() if current else s
-        if current.strip():
-            chunks.append(current.strip())
-
-        # If no sentence boundaries found, split by commas or force split
-        if len(chunks) == 1 and len(chunks[0]) > max_chars:
-            text = chunks[0]
-            chunks = []
-            parts = re.split(r'(?<=[,，])\s*', text)
-            current = ""
-            for p in parts:
-                if current and len(current) + len(p) + 1 > max_chars:
-                    chunks.append(current.strip())
-                    current = p
-                else:
-                    current = f"{current} {p}".strip() if current else p
-            if current.strip():
-                chunks.append(current.strip())
-
-        return chunks if chunks else [text]
-
     def synthesize_with_trained_voice(
         self, text: str, checkpoint_path: str,
         ref_audio_path: str | None = None, ref_text: str | None = None,
         voice_id: str = "",
     ) -> tuple[str, float | None, float]:
         """Synthesize using a LoRA-finetuned trained voice.
-        Splits long text into chunks for faster processing.
-        Note: ensure_model_for_trained_voice must be called BEFORE this method
-        to guarantee the correct GPU model is loaded.
+        Uses SDK's built-in max_chars=256 text splitting — no manual chunking needed.
+        Note: ensure_model_for_trained_voice must be called BEFORE this method.
         """
-        # Wait for any model loading to finish (e.g. startup auto-load)
-        for _ in range(120):  # wait up to 60s
+        # Wait for any model loading to finish
+        for _ in range(120):
             if not self._is_loading:
                 break
             time.sleep(0.5)
@@ -394,7 +360,7 @@ class TTSService:
 
         self._ensure_initialized()
 
-        # Double-check: need GPU model for LoRA — GGUF models don't support adapters
+        # Need GPU model for LoRA — GGUF models don't support adapters
         if "gguf" in self._current_model.lower():
             raise RuntimeError(
                 "Trained voice cần model GPU (PyTorch). "
@@ -414,7 +380,7 @@ class TTSService:
                     print("   🧹 Cleaned up leftover LoRA adapter")
                 except Exception:
                     pass
-            if hasattr(self.tts.backbone, 'peft_config'):
+            if hasattr(self.tts, 'backbone') and hasattr(self.tts.backbone, 'peft_config'):
                 try:
                     self.tts.backbone = self.tts.backbone.merge_and_unload() if hasattr(self.tts.backbone, 'merge_and_unload') else self.tts.backbone
                     self.tts._lora_loaded = False
@@ -426,53 +392,23 @@ class TTSService:
             print(f"🔄 Loading LoRA adapter: {checkpoint_path}")
             self.tts.load_lora_adapter(checkpoint_path)
 
-            # Build base inference kwargs (ref audio / voice)
-            base_kwargs = {}
+            # Build inference kwargs
+            kwargs = {"text": text}
             if ref_audio_path and os.path.exists(ref_audio_path):
-                base_kwargs["ref_audio"] = ref_audio_path
-                base_kwargs["ref_text"] = ref_text or ""
+                kwargs["ref_audio"] = ref_audio_path
+                kwargs["ref_text"] = ref_text or ""
                 print(f"   📎 Using ref audio: {os.path.basename(ref_audio_path)}")
             elif voice_id:
                 try:
-                    base_kwargs["voice"] = self.tts.get_preset_voice(voice_id)
+                    kwargs["voice"] = self.tts.get_preset_voice(voice_id)
                 except Exception:
                     pass
 
-            # Split text into chunks for faster processing
-            chunks = self._split_text_to_chunks(text, max_chars=150)
-            print(f"   📝 Text split into {len(chunks)} chunk(s)")
-
-            if len(chunks) == 1:
-                # Single chunk — direct synthesis
-                audio = self.tts.infer(text=chunks[0], **base_kwargs)
-                self.tts.save(audio, output_path)
-            else:
-                # Multiple chunks — synthesize each and concatenate
-                import numpy as np
-                import soundfile as sf
-
-                all_audio = []
-                for i, chunk in enumerate(chunks):
-                    t0 = time.time()
-                    print(f"   🔊 Chunk {i+1}/{len(chunks)}: {chunk[:60]}...")
-                    audio = self.tts.infer(text=chunk, **base_kwargs)
-                    # Extract numpy array from audio object
-                    if hasattr(audio, 'audios') and audio.audios:
-                        arr = audio.audios[0]
-                    elif isinstance(audio, np.ndarray):
-                        arr = audio
-                    else:
-                        # Try saving to temp file and reading back
-                        tmp = os.path.join(output_dir, f"_chunk_{i}.wav")
-                        self.tts.save(audio, tmp)
-                        arr, sr = sf.read(tmp)
-                        os.remove(tmp)
-                    all_audio.append(arr)
-                    print(f"      ✅ Chunk {i+1} done ({time.time()-t0:.1f}s)")
-
-                # Concatenate all audio arrays
-                combined = np.concatenate(all_audio)
-                sf.write(output_path, combined, 24000)
+            # SDK handles text splitting internally (max_chars=256)
+            # No need for manual chunking!
+            print(f"   📝 Text length: {len(text)} chars")
+            audio = self.tts.infer(**kwargs)
+            self.tts.save(audio, output_path)
 
         finally:
             # Always unload adapter after inference
@@ -484,7 +420,7 @@ class TTSService:
 
         elapsed = time.time() - start
         duration = self._get_audio_duration(output_path)
-        print(f"🎵 Total: {len(chunks)} chunks, {duration:.1f}s audio, {elapsed:.1f}s processing")
+        print(f"🎵 Total: {duration:.1f}s audio, {elapsed:.1f}s processing")
         return output_path, duration, elapsed
 
     def ensure_model_for_trained_voice(self, base_model_repo: str | None) -> str | None:
