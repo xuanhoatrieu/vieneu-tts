@@ -301,37 +301,18 @@ class TTSService:
         return output_path, duration, elapsed
 
     def get_preset_voices(self) -> list[dict]:
-        """Get available preset voices, sorted by region & gender."""
-        # Mapping: voice_id -> (display_name, sort_order)
-        VOICE_MAP = {
-            "Binh":  ("North-Male-Bình",   1),
-            "Tuyen": ("North-Male-Tuyên",  2),
-            "Ly":    ("North-Female-Ly",    3),
-            "Ngoc":  ("North-Female-Ngọc",  4),
-            "Vinh":  ("South-Male-Vĩnh",   5),
-            "Doan":  ("South-Female-Đoan",  6),
-        }
-        try:
-            self._ensure_initialized()
-            voices = self.tts.list_preset_voices()
-            result = []
-            for desc, vid in voices:
-                name, order = VOICE_MAP.get(vid, (desc, 99))
-                result.append({"id": vid, "name": name, "language": "vi", "_order": order})
-            result.sort(key=lambda v: v["_order"])
-            for v in result:
-                v.pop("_order", None)
-            return result
-        except Exception as e:
-            print(f"⚠️ Could not load preset voices: {e}")
-            return [
-                {"id": "Binh",  "name": "North-Male-Bình",   "language": "vi"},
-                {"id": "Tuyen", "name": "North-Male-Tuyên",  "language": "vi"},
-                {"id": "Ly",    "name": "North-Female-Ly",    "language": "vi"},
-                {"id": "Ngoc",  "name": "North-Female-Ngọc",  "language": "vi"},
-                {"id": "Vinh",  "name": "South-Male-Vĩnh",   "language": "vi"},
-                {"id": "Doan",  "name": "South-Female-Đoan",  "language": "vi"},
-            ]
+        """Get available preset voices.
+        These are the same 6 voices for all VieNeu models,
+        so we return them statically rather than querying the model.
+        """
+        return [
+            {"id": "Binh",  "name": "North-Male-Bình",   "language": "vi"},
+            {"id": "Tuyen", "name": "North-Male-Tuyên",  "language": "vi"},
+            {"id": "Ly",    "name": "North-Female-Ly",    "language": "vi"},
+            {"id": "Ngoc",  "name": "North-Female-Ngọc",  "language": "vi"},
+            {"id": "Vinh",  "name": "South-Male-Vĩnh",   "language": "vi"},
+            {"id": "Doan",  "name": "South-Female-Đoan",  "language": "vi"},
+        ]
 
     def encode_reference(self, audio_path: str) -> dict | None:
         try:
