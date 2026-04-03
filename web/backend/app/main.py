@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.api.v1 import auth, users, api_keys, tts, refs, sentences, training, admin
+from app.api.v1 import omnivoice as omnivoice_api
 
 # Frontend build directory
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -58,6 +59,7 @@ app.include_router(refs.router, prefix="/api/v1/refs", tags=["References"])
 app.include_router(sentences.router, prefix="/api/v1/sentences", tags=["Sentences"])
 app.include_router(training.router, prefix="/api/v1/training", tags=["Training"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
+app.include_router(omnivoice_api.router, prefix="/api/v1/omnivoice", tags=["OmniVoice"])
 
 
 @app.get("/health")

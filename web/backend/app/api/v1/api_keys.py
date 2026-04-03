@@ -1,6 +1,7 @@
 """
 API Key endpoints — create, list, revoke.
 """
+import uuid
 from typing import List
 
 from fastapi import APIRouter, HTTPException, status
@@ -43,10 +44,10 @@ async def create_api_key(body: APIKeyCreateRequest, user: CurrentUser, db: DBSes
 
 @router.get("", response_model=List[APIKeyResponse])
 async def list_api_keys(user: CurrentUser, db: DBSession):
-    """List all API keys for the current user (key NOT shown)."""
+    """List all active API keys for the current user (key NOT shown)."""
     result = await db.execute(
         select(APIKey)
-        .where(APIKey.user_id == user.id)
+        .where(APIKey.user_id == user.id, APIKey.is_active == True)
         .order_by(APIKey.created_at.desc())
     )
     keys = result.scalars().all()
@@ -54,8 +55,8 @@ async def list_api_keys(user: CurrentUser, db: DBSession):
 
 
 @router.delete("/{key_id}", status_code=204)
-async def revoke_api_key(key_id: str, user: CurrentUser, db: DBSession):
-    """Revoke (deactivate) an API key."""
+async def revoke_api_key(key_id: uuid.UUID, user: CurrentUser, db: DBSession):
+    """Revoke (delete) an API key."""
     result = await db.execute(
         select(APIKey).where(APIKey.id == key_id, APIKey.user_id == user.id)
     )
@@ -64,5 +65,5 @@ async def revoke_api_key(key_id: str, user: CurrentUser, db: DBSession):
     if not api_key:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    api_key.is_active = False
+    await db.delete(api_key)
     await db.commit()

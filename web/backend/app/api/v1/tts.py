@@ -38,50 +38,195 @@ _synthesis_jobs: dict[str, dict] = {}
 
 @router.get("/models")
 async def get_available_models(user: CurrentUser):
-    """Get available TTS models + GPU status for the model selector."""
-    return tts_service.get_model_status()
+    """VieNeu TTS models — temporarily disabled, using OmniVoice."""
+    return {
+        "available_models": [],
+        "current_model": None,
+        "is_loading": False,
+        "engine": "omnivoice",
+        "message": "Đang sử dụng OmniVoice (600+ ngôn ngữ). Dùng GET /api/v1/tts/options để xem tùy chọn.",
+    }
 
 
 @router.post("/models/switch")
 async def switch_tts_model(body: dict, user: CurrentUser):
-    """User requests model switch. GPU models validated for VRAM."""
-    repo = body.get("repo", "")
-    if not repo:
-        raise HTTPException(400, "Missing 'repo'")
-    try:
-        tts_service.switch_model(repo)
-        return {"ok": True, "message": f"Đang chuyển sang model mới..."}
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(400, str(e))
+    raise HTTPException(503, "VieNeu TTS tạm ngưng. Dùng GET /api/v1/tts/options để xem tùy chọn.")
 
 
 @router.get("/models/status")
 async def tts_model_status(user: CurrentUser):
-    """Poll model loading status."""
-    return tts_service.get_model_status()
+    from app.services.omnivoice_service import omnivoice_service
+    status = omnivoice_service.get_status()
+    return {"current_model": "OmniVoice", "is_loading": status["is_loading"], "engine": "omnivoice"}
+
+
+@router.get("/options")
+async def get_tts_options(user: CurrentUser, db: DBSession):
+    """
+    Discovery endpoint — returns all available TTS options for external apps.
+    Includes modes, voice library references, and voice design attributes.
+    """
+    from app.services.omnivoice_service import omnivoice_service
+
+    # Get user's voice library
+    result = await db.execute(
+        select(UserReference)
+        .where(UserReference.user_id == user.id)
+        .order_by(UserReference.created_at.desc())
+    )
+    refs = result.scalars().all()
+
+    return {
+        "engine": "omnivoice",
+        "model": "k2-fsa/OmniVoice",
+        "status": omnivoice_service.get_status(),
+        "modes": [
+            {
+                "id": "auto",
+                "name": "Auto Voice",
+                "description": "Model tự chọn giọng phù hợp",
+                "params": ["text", "speed", "num_step", "normalize"],
+            },
+            {
+                "id": "clone",
+                "name": "Voice Cloning",
+                "description": "Clone giọng từ Voice Library",
+                "params": ["text", "ref_id", "speed", "num_step", "normalize"],
+            },
+            {
+                "id": "design",
+                "name": "Voice Design",
+                "description": "Thiết kế giọng theo thuộc tính",
+                "params": ["text", "gender", "age", "pitch", "style", "accent", "speed", "num_step", "normalize"],
+            },
+        ],
+        "voice_library": [
+            {
+                "ref_id": str(r.id),
+                "name": r.name,
+                "language": r.language,
+                "ref_text": r.ref_text,
+                "duration_sec": r.duration_sec,
+            }
+            for r in refs
+        ],
+        "design_attributes": {
+            "gender": ["male", "female"],
+            "age": ["child", "young", "middle-aged", "elderly"],
+            "pitch": ["very low", "low", "normal", "high", "very high"],
+            "style": ["normal", "whisper"],
+            "accent": ["", "american accent", "british accent", "australian accent", "indian accent"],
+        },
+        "defaults": {
+            "speed": 1.0,
+            "num_step": 32,
+            "normalize": True,
+        },
+    }
 
 
 @router.post("/synthesize", response_model=SynthesizeResponse)
-async def synthesize_preset(body: SynthesizeRequest, user: CurrentUser, db: DBSession):
-    """Synthesize speech with a preset voice."""
+async def synthesize(body: dict, user: CurrentUser, db: DBSession):
+    """
+    Unified TTS synthesis — powered by OmniVoice.
+
+    Modes:
+    - auto:   {"text": "...", "mode": "auto"}
+    - clone:  {"text": "...", "mode": "clone", "ref_id": "uuid"}
+    - design: {"text": "...", "mode": "design", "gender": "female", "age": "young", ...}
+
+    Optional params: speed (0.5-2.0), num_step (16/32), normalize (true/false)
+    """
+    from app.services.omnivoice_service import omnivoice_service
+
+    text = body.get("text", "").strip()
+    if not text:
+        raise HTTPException(400, "Missing 'text'")
+    if len(text) > 5000:
+        raise HTTPException(400, "Text too long (max 5000 chars)")
+
+    mode = body.get("mode", "auto")
+    speed = float(body.get("speed", 1.0))
+    num_step = int(body.get("num_step", 32))
+    normalize = body.get("normalize", True)
+
     try:
-        output_path, duration, elapsed = tts_service.synthesize_preset(
-            text=body.text,
-            voice_id=body.voice_id,
-            mode=body.mode,
-        )
+        if mode == "clone":
+            ref_id = body.get("ref_id")
+            if not ref_id:
+                raise HTTPException(400, "mode=clone requires 'ref_id'")
+
+            # Look up reference
+            import uuid as _uuid
+            try:
+                rid = _uuid.UUID(ref_id)
+            except ValueError:
+                raise HTTPException(400, "Invalid ref_id format")
+
+            result = await db.execute(
+                select(UserReference).where(
+                    UserReference.id == rid,
+                    UserReference.user_id == user.id,
+                )
+            )
+            ref = result.scalar_one_or_none()
+            if not ref:
+                raise HTTPException(404, "Reference not found")
+            if not os.path.exists(ref.audio_path):
+                raise HTTPException(404, "Reference audio file not found")
+
+            output_path, duration, elapsed = omnivoice_service.generate_clone(
+                text=text,
+                ref_audio_path=ref.audio_path,
+                ref_text=ref.ref_text or None,
+                speed=speed, num_step=num_step, normalize=normalize,
+            )
+
+        elif mode == "design":
+            # Build instruct from attributes
+            parts = [body.get("gender", "female")]
+            age = body.get("age", "")
+            if age and age != "young":
+                parts.append(age)
+            pitch = body.get("pitch", "")
+            if pitch and pitch != "normal":
+                parts.append(pitch + " pitch")
+            style = body.get("style", "")
+            if style == "whisper":
+                parts.append("whisper")
+            accent = body.get("accent", "")
+            if accent:
+                parts.append(accent)
+            custom = body.get("custom_instruct", "")
+            if custom:
+                parts.append(custom)
+            instruct = ", ".join(parts)
+
+            output_path, duration, elapsed = omnivoice_service.generate_design(
+                text=text, instruct=instruct,
+                speed=speed, num_step=num_step, normalize=normalize,
+            )
+
+        else:  # auto
+            output_path, duration, elapsed = omnivoice_service.generate_auto(
+                text=text,
+                speed=speed, num_step=num_step, normalize=normalize,
+            )
+
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+        raise HTTPException(500, f"Synthesis failed: {str(e)}")
 
     # Save to history
     history = AudioHistory(
         user_id=user.id,
-        voice_preset=body.voice_id,
-        input_text=body.text,
+        voice_preset=f"omnivoice-{mode}",
+        input_text=text,
         audio_path=output_path,
         duration_sec=duration,
-        model_mode=body.mode,
+        model_mode=f"omnivoice-{mode}",
         processing_time_sec=elapsed,
     )
     db.add(history)
@@ -368,9 +513,13 @@ async def list_voices():
 
 @router.get("/audio/{filename}")
 async def get_audio(filename: str):
-    """Serve synthesized audio file."""
+    """Serve synthesized audio file (VieNeu or OmniVoice)."""
     output_dir = os.path.join(settings.STORAGE_PATH, "outputs")
     filepath = os.path.join(output_dir, filename)
+
+    # Also check omnivoice subdirectory
+    if not os.path.exists(filepath):
+        filepath = os.path.join(output_dir, "omnivoice", filename)
 
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Audio not found")

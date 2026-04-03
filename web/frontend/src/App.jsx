@@ -9,6 +9,7 @@ import RecordingStudioPage from './pages/RecordingStudioPage';
 import TrainingPage from './pages/TrainingPage';
 import APIKeysPage from './pages/APIKeysPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
+import OmniVoicePage from './pages/OmniVoicePage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -20,7 +21,7 @@ function ProtectedRoute({ children }) {
 function AdminRoute({ children }) {
   const { isAdmin, loading } = useAuth();
   if (loading) return <div className="loading-page"><span className="spinner" /></div>;
-  if (!isAdmin) return <Navigate to="/studio" replace />;
+  if (!isAdmin) return <Navigate to="/omnivoice" replace />;
   return children;
 }
 
@@ -30,9 +31,10 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/studio" replace /> : <LoginPage />} />
+      <Route path="/login" element={user ? <Navigate to="/omnivoice" replace /> : <LoginPage />} />
       <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route path="/studio" element={<TTSStudioPage />} />
+        <Route path="/omnivoice" element={<OmniVoicePage />} />
         <Route path="/voices" element={<VoiceLibraryPage />} />
         <Route path="/recording" element={<RecordingStudioPage />} />
         <Route path="/training" element={<TrainingPage />} />
@@ -41,7 +43,7 @@ function AppRoutes() {
         <Route path="/admin/queue" element={<AdminRoute><AdminDashboardPage /></AdminRoute>} />
         <Route path="/admin/sets" element={<AdminRoute><AdminDashboardPage /></AdminRoute>} />
       </Route>
-      <Route path="*" element={<Navigate to="/studio" replace />} />
+      <Route path="*" element={<Navigate to="/omnivoice" replace />} />
     </Routes>
   );
 }

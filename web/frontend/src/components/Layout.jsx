@@ -2,7 +2,8 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 const navItems = [
-  { to: '/studio',    icon: '🎙️', label: 'TTS Studio' },
+  { to: '/omnivoice', icon: '🌍', label: 'OmniVoice' },
+  { to: '/studio',    icon: '🎙️', label: 'TTS Studio', badge: 'soon' },
   { to: '/voices',    icon: '📚', label: 'Voice Library' },
   { to: '/recording', icon: '🎤', label: 'Recording Studio' },
   { to: '/training',  icon: '🏋️', label: 'Training' },
@@ -36,15 +37,23 @@ export default function Layout() {
             <rect x="14" y="5" width="2" height="14" rx="1" fill="currentColor" opacity="0.6"/>
             <rect x="18" y="8" width="2" height="8" rx="1" fill="currentColor" opacity="0.4"/>
           </svg>
-          <span>VieNeu TTS</span>
+          <span>OmniVoice Studio</span>
         </div>
 
         <nav className="sidebar-nav">
           {navItems.map(item => (
             <NavLink key={item.to} to={item.to}
-              className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}>
+              className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}
+              style={item.badge ? { opacity: 0.5 } : undefined}>
               <span style={{ fontSize: 16 }}>{item.icon}</span>
               <span>{item.label}</span>
+              {item.badge && (
+                <span style={{
+                  fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 6,
+                  background: 'rgba(245,158,11,0.15)', color: '#fbbf24',
+                  marginLeft: 'auto', textTransform: 'uppercase',
+                }}>soon</span>
+              )}
             </NavLink>
           ))}
 

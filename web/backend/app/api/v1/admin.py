@@ -359,6 +359,48 @@ async def delete_training_request(
     return {"ok": True}
 
 
+@router.get("/training-queue/{request_id}/log")
+async def get_training_log(
+    request_id: int,
+    tail: int = Query(default=200, ge=10, le=5000, description="Number of last lines to return"),
+    admin: AdminUser = None,
+    db: DBSession = None,
+):
+    """Get training log for a request. Returns last N lines as plain text."""
+    from fastapi.responses import PlainTextResponse
+    from app.services.training_runner import get_training_log_path
+
+    result = await db.execute(
+        select(TrainingRequest).where(TrainingRequest.id == request_id)
+    )
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(404, "Request not found")
+
+    log_path = get_training_log_path(str(req.user_id), request_id)
+
+    import os
+    if not os.path.exists(log_path):
+        return PlainTextResponse(
+            f"[No log file yet — training may not have started]\n"
+            f"Status: {req.status} | Progress: {req.progress}%",
+            media_type="text/plain; charset=utf-8",
+        )
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        # Return last N lines
+        content = "".join(lines[-tail:])
+        header = f"--- Training Log (request #{request_id}) | showing last {min(tail, len(lines))}/{len(lines)} lines ---\n\n"
+        return PlainTextResponse(
+            header + content,
+            media_type="text/plain; charset=utf-8",
+        )
+    except Exception as e:
+        return PlainTextResponse(f"[Error reading log: {e}]", media_type="text/plain; charset=utf-8")
+
+
 # ─── Model Management ───────────────────────────────
 
 @router.get("/models")

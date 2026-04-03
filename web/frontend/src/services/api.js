@@ -138,11 +138,27 @@ class ApiService {
     return this.request(`/admin/training-queue/${id}/start?${params}`, { method: 'POST' });
   }
   deleteTraining(id)    { return this.del(`/admin/training-queue/${id}`); }
+  async getTrainingLog(id, tail = 200) {
+    const res = await fetch(`${API_BASE}/admin/training-queue/${id}/log?tail=${tail}`, {
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+    });
+    if (!res.ok) throw new Error('Failed to load log');
+    return res.text();
+  }
 
   // API Keys
   getApiKeys()          { return this.get('/api-keys'); }
   createApiKey(name)    { return this.post('/api-keys', { name }); }
   deleteApiKey(id)      { return this.del(`/api-keys/${id}`); }
+
+  // OmniVoice
+  omniVoiceClone(fd)    { return this.upload('/omnivoice/generate-clone', fd); }
+  omniVoiceCloneRef(fd) { return this.upload('/omnivoice/generate-clone-ref', fd); }
+  omniVoiceDesign(body) { return this.post('/omnivoice/generate-design', body); }
+  omniVoiceAuto(body)   { return this.post('/omnivoice/generate-auto', body); }
+  omniVoiceStatus()     { return this.get('/omnivoice/status'); }
+  pollOmniJob(jobId)    { return this.get(`/omnivoice/jobs/${jobId}`); }
+  getOmniAudioUrl(fn)   { return `${API_BASE}/omnivoice/audio/${fn}`; }
 }
 
 export const api = new ApiService();

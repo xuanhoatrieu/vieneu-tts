@@ -58,17 +58,47 @@ async def _update_request(db: AsyncSession, request_id: int, **kwargs):
 
 
 def _run_script(cmd, cwd=None, env=None):
-    """Run a subprocess, return (success, stdout, stderr)."""
+    """Run a subprocess, return (success, stdout, stderr). No timeout."""
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
     result = subprocess.run(
-        cmd, capture_output=True, text=True, cwd=cwd, env=merged_env, timeout=7200
+        cmd, capture_output=True, text=True, cwd=cwd, env=merged_env,
     )
     if result.returncode != 0:
         print(f"❌ Script failed: {' '.join(cmd)}")
         print(f"   stderr: {result.stderr[-500:]}")
     return result.returncode == 0, result.stdout, result.stderr
+
+
+def _run_script_with_log(cmd, log_file, cwd=None, env=None):
+    """Run a subprocess, streaming stdout+stderr to a log file in real-time."""
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    with open(log_file, "a", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            cmd, stdout=f, stderr=subprocess.STDOUT,
+            text=True, cwd=cwd, env=merged_env,
+        )
+        proc.wait()
+    # Read content for return value
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        stdout = content
+    except Exception:
+        stdout = ""
+    if proc.returncode != 0:
+        print(f"❌ Script failed (exit {proc.returncode}): {' '.join(cmd[:3])}...")
+    return proc.returncode == 0, stdout, ""
+
+
+def get_training_log_path(user_id: str, request_id: int) -> str:
+    """Get the log file path for a training request."""
+    return os.path.join(
+        settings.STORAGE_PATH, "training", str(user_id), str(request_id), "training.log"
+    )
 
 
 async def run_training_pipeline(request_id: int, max_steps: int = None, gpu_id: int = None):
@@ -116,9 +146,18 @@ async def run_training_pipeline(request_id: int, max_steps: int = None, gpu_id: 
 
     env = {"CUDA_VISIBLE_DEVICES": str(gpu_id)}
 
+    # Log file for this training run
+    log_path = os.path.join(output_dir, "training.log")
+
+    def _log(msg):
+        """Append a message to both stdout and the training log file."""
+        print(msg)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}\n")
+
     try:
         # ── Step 1: Generate metadata.csv (0→10%) ──
-        print(f"🔄 [{request_id}] Step 1: Generating metadata.csv...")
+        _log(f"🔄 [{request_id}] Step 1: Generating metadata.csv...")
         async with async_session() as db:
             sent_result = await db.execute(
                 select(Sentence.id).where(Sentence.set_id == set_id)
@@ -150,39 +189,38 @@ async def run_training_pipeline(request_id: int, max_steps: int = None, gpu_id: 
         metadata_path = os.path.join(dataset_dir, "metadata.csv")
         with open(metadata_path, "w", encoding="utf-8") as f:
             f.writelines(metadata_lines)
-        print(f"   ✅ {len(metadata_lines)} samples → {metadata_path}")
+        _log(f"   ✅ {len(metadata_lines)} samples → {metadata_path}")
 
         async with async_session() as db:
             await _update_request(db, request_id, progress=10)
 
         # ── Step 2: Filter data (10→20%) ──
-        print(f"🔄 [{request_id}] Step 2: Filtering data...")
-        filter_script = os.path.join(VIENEU_TTS_ROOT, "finetune", "data_scripts", "filter_data.py")
+        _log(f"🔄 [{request_id}] Step 2: Filtering data...")
         ok, stdout, stderr = await asyncio.to_thread(
-            _run_script,
+            _run_script_with_log,
             [sys.executable, "-c", f"""
 import sys
 sys.path.insert(0, '{VIENEU_TTS_ROOT}')
 from finetune.data_scripts.filter_data import filter_and_process_dataset
 filter_and_process_dataset(dataset_dir='{dataset_dir}')
 """],
-            cwd=VIENEU_TTS_ROOT, env=env,
+            log_path, cwd=VIENEU_TTS_ROOT, env=env,
         )
-        print(f"   {'✅' if ok else '⚠️'} Filter done. {stdout[-200:] if stdout else ''}")
+        _log(f"   {'✅' if ok else '⚠️'} Filter done.")
 
         # If filter removed all samples, use original metadata
         cleaned_path = os.path.join(dataset_dir, "metadata_cleaned.csv")
         if not os.path.exists(cleaned_path) or os.path.getsize(cleaned_path) == 0:
-            print("   ⚠️ Filter removed all samples, using original metadata")
+            _log("   ⚠️ Filter removed all samples, using original metadata")
             shutil.copy2(metadata_path, cleaned_path)
 
         async with async_session() as db:
             await _update_request(db, request_id, progress=20)
 
         # ── Step 3: Encode NeuCodec (20→50%) ──
-        print(f"🔄 [{request_id}] Step 3: Encoding with NeuCodec...")
+        _log(f"🔄 [{request_id}] Step 3: Encoding with NeuCodec...")
         ok, stdout, stderr = await asyncio.to_thread(
-            _run_script,
+            _run_script_with_log,
             [sys.executable, "-c", f"""
 import sys, os
 os.environ['HF_HOME'] = '{os.path.join(os.path.dirname(VIENEU_TTS_ROOT), "models")}'
@@ -190,23 +228,28 @@ sys.path.insert(0, '{VIENEU_TTS_ROOT}')
 from finetune.data_scripts.encode_data import encode_dataset
 encode_dataset(dataset_dir='{dataset_dir}', max_samples=9999)
 """],
-            cwd=VIENEU_TTS_ROOT, env=env,
+            log_path, cwd=VIENEU_TTS_ROOT, env=env,
         )
         if not ok:
-            raise RuntimeError(f"NeuCodec encoding failed: {stderr[-300:]}")
-        print(f"   ✅ Encode done. {stdout[-200:] if stdout else ''}")
+            _log(f"❌ NeuCodec encoding failed!")
+            raise RuntimeError(f"NeuCodec encoding failed")
+        _log(f"   ✅ Encode done.")
 
         async with async_session() as db:
             await _update_request(db, request_id, progress=50)
 
         # ── Step 4: Run LoRA training (50→90%) ──
-        print(f"🔄 [{request_id}] Step 4: LoRA training ({max_steps} steps)...")
+        _log(f"🔄 [{request_id}] Step 4: LoRA training ({max_steps} steps)...")
         checkpoint_dir = os.path.join(output_dir, "checkpoint")
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+        hf_home = os.path.join(os.path.dirname(VIENEU_TTS_ROOT), "models")
+        encoded_csv = os.path.join(dataset_dir, "metadata_encoded.csv")
+        save_steps = max_steps // 5 if max_steps >= 100 else max_steps
+
         train_script = f"""
 import sys, os, gc
-os.environ['HF_HOME'] = '{os.path.join(os.path.dirname(VIENEU_TTS_ROOT), "models")}'
+os.environ['HF_HOME'] = '{hf_home}'
 sys.path.insert(0, '{VIENEU_TTS_ROOT}')
 sys.path.insert(0, os.path.join('{VIENEU_TTS_ROOT}', 'src'))
 
@@ -241,7 +284,7 @@ model.enable_input_require_grads()
 
 # Dataset
 from finetune.train import VieNeuDataset
-dataset_path = '{os.path.join(dataset_dir, "metadata_encoded.csv")}'
+dataset_path = '{encoded_csv}'
 dataset = VieNeuDataset(dataset_path, tokenizer)
 print(f"Dataset: {{len(dataset)}} samples")
 
@@ -255,7 +298,7 @@ args = TrainingArguments(
     learning_rate={DEFAULT_LR},
     warmup_ratio=0.05, bf16=True,
     logging_steps=50,
-    save_steps={max_steps // 5 if max_steps >= 100 else max_steps},
+    save_steps={save_steps},
     eval_strategy="no", save_strategy="steps",
     save_total_limit=3, report_to="none",
     dataloader_num_workers=0,
@@ -274,13 +317,14 @@ print(f"Training complete. Saved to: {{save_path}}")
 """
 
         ok, stdout, stderr = await asyncio.to_thread(
-            _run_script,
+            _run_script_with_log,
             [sys.executable, "-c", train_script],
-            cwd=VIENEU_TTS_ROOT, env=env,
+            log_path, cwd=VIENEU_TTS_ROOT, env=env,
         )
         if not ok:
-            raise RuntimeError(f"LoRA training failed: {stderr[-500:]}")
-        print(f"   ✅ Training done!")
+            _log(f"❌ LoRA training failed!")
+            raise RuntimeError(f"LoRA training failed — xem log để biết chi tiết")
+        _log(f"   ✅ Training done!")
 
         async with async_session() as db:
             await _update_request(db, request_id, progress=90)
@@ -288,7 +332,7 @@ print(f"Training complete. Saved to: {{save_path}}")
         # ── Step 4.5: Create voices.json for the checkpoint ──
         # This is CRITICAL for quality: load_lora_adapter() loads voices.json
         # to provide pre-encoded NeuCodec reference → consistent with training
-        print(f"🔄 [{request_id}] Step 4.5: Creating voices.json from ref audio...")
+        _log(f"🔄 [{request_id}] Step 4.5: Creating voices.json from ref audio...")
         final_checkpoint = os.path.join(checkpoint_dir, "final")
         if not os.path.isdir(final_checkpoint):
             final_checkpoint = checkpoint_dir
@@ -372,16 +416,16 @@ with open(voices_path, 'w', encoding='utf-8') as f:
 print(f"Created voices.json: {{len(codes_list)}} codes")
 """
             ok, stdout, stderr = await asyncio.to_thread(
-                _run_script,
+                _run_script_with_log,
                 [sys.executable, "-c", voices_json_script],
-                cwd=VIENEU_TTS_ROOT, env=env,
+                log_path, cwd=VIENEU_TTS_ROOT, env=env,
             )
             if ok:
-                print(f"   ✅ voices.json created! {stdout.strip()}")
+                _log(f"   ✅ voices.json created!")
             else:
-                print(f"   ⚠️ voices.json creation failed (non-critical): {stderr[-200:]}")
+                _log(f"   ⚠️ voices.json creation failed (non-critical)")
         else:
-            print(f"   ⚠️ No ref audio found, skipping voices.json creation")
+            _log(f"   ⚠️ No ref audio found, skipping voices.json creation")
 
         # ── Step 5: Create trained_voice record (95→100%) ──
         # best_ref_path and best_ref_text already set in Step 4.5
@@ -409,9 +453,21 @@ print(f"Created voices.json: {{len(codes_list)}} codes")
             req.completed_at = datetime.now(timezone.utc)
             await db.commit()
 
-        print(f"✅ Training complete: {voice_name} (request #{request_id}, {max_steps} steps)")
+        _log(f"✅ Training complete: {voice_name} (request #{request_id}, {max_steps} steps)")
 
     except Exception as e:
+        error_msg = str(e)
+        # Log error to file
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"❌ TRAINING FAILED: {error_msg}\n")
+                import traceback
+                f.write(traceback.format_exc())
+                f.write(f"{'='*60}\n")
+        except Exception:
+            pass
+
         async with async_session() as db:
             result = await db.execute(
                 select(TrainingRequest).where(TrainingRequest.id == request_id)

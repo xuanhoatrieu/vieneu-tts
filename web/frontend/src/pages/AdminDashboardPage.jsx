@@ -112,7 +112,7 @@ export default function AdminDashboardPage() {
         {tab === 'overview' && <OverviewTab stats={stats} queue={queue} users={users} />}
         {tab === 'users' && <UsersTab users={users} onReload={loadUsers} />}
         {tab === 'training' && <TrainingTab queue={queue} filter={filter} setFilter={setFilter}
-          approve={approve} reject={reject} start={start} />}
+          approve={approve} reject={reject} start={start} onDelete={del} />}
         {tab === 'sets' && <SetsTab sets={sets} onReload={loadSets} />}
       </div>
     </>
@@ -529,7 +529,9 @@ function AddUserModal({ onClose, onDone }) {
 }
 
 /* ─── Training Tab ───────────────────────────────── */
-function TrainingTab({ queue, filter, setFilter, approve, reject, start }) {
+function TrainingTab({ queue, filter, setFilter, approve, reject, start, onDelete }) {
+  const [logReqId, setLogReqId] = useState(null);
+
   return (
     <>
       <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-5)', alignItems: 'center' }}>
@@ -540,6 +542,7 @@ function TrainingTab({ queue, filter, setFilter, approve, reject, start }) {
           <option value="approved">Approved</option>
           <option value="training">Training</option>
           <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
           <option value="rejected">Rejected</option>
         </select>
       </div>
@@ -566,7 +569,7 @@ function TrainingTab({ queue, filter, setFilter, approve, reject, start }) {
                 </td>
                 <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{new Date(req.submitted_at).toLocaleString('vi')}</td>
                 <td>
-                  <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
+                  <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
                     {req.status === 'pending' && (
                       <>
                         <button className="btn btn-primary btn-sm" onClick={() => approve(req.id)}>✅</button>
@@ -580,7 +583,16 @@ function TrainingTab({ queue, filter, setFilter, approve, reject, start }) {
                     {req.status === 'completed' && <span style={{ fontSize: 12, color: 'var(--success)' }}>✅ Done</span>}
                     {req.status === 'rejected' && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🚫</span>}
                     {req.status === 'failed' && <span style={{ fontSize: 12, color: 'var(--danger)' }}>❌ Failed</span>}
-                    <button className="btn btn-ghost btn-sm" onClick={() => del(req.id)} title="Xóa" style={{ marginLeft: 4 }}>🗑️</button>
+
+                    {/* Log button — show for training, completed, failed */}
+                    {['training', 'completed', 'failed'].includes(req.status) && (
+                      <button className="btn btn-secondary btn-sm" onClick={() => setLogReqId(req.id)}
+                        title="Xem log training" style={{ fontSize: 11, padding: '2px 8px' }}>
+                        📋 Log
+                      </button>
+                    )}
+
+                    <button className="btn btn-ghost btn-sm" onClick={() => onDelete(req.id)} title="Xóa" style={{ marginLeft: 4 }}>🗑️</button>
                   </div>
                 </td>
               </tr>
@@ -588,7 +600,92 @@ function TrainingTab({ queue, filter, setFilter, approve, reject, start }) {
           </tbody>
         </table>
       </div>
+
+      {logReqId && <TrainingLogModal requestId={logReqId} onClose={() => setLogReqId(null)}
+        isTraining={queue.find(q => q.id === logReqId)?.status === 'training'} />}
     </>
+  );
+}
+
+/* ─── Training Log Modal ─────────────────────────── */
+function TrainingLogModal({ requestId, onClose, isTraining }) {
+  const [log, setLog] = useState('Loading...');
+  const [loading, setLoading] = useState(true);
+  const [tail, setTail] = useState(200);
+  const logRef = useState(null);
+
+  const loadLog = async (lines) => {
+    try {
+      const text = await api.getTrainingLog(requestId, lines || tail);
+      setLog(text);
+    } catch (err) {
+      setLog(`[Error: ${err.message}]`);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadLog(); }, [requestId, tail]);
+
+  // Auto-refresh every 3s if training is in progress
+  useEffect(() => {
+    if (!isTraining) return;
+    const interval = setInterval(() => loadLog(), 3000);
+    return () => clearInterval(interval);
+  }, [isTraining, tail]);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (logRef[0]) logRef[0].scrollTop = logRef[0].scrollHeight;
+  }, [log]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose} style={{ zIndex: 9999 }}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{
+        maxWidth: 900, width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+          <h2 className="modal-title" style={{ margin: 0 }}>
+            📋 Training Log — Request #{requestId}
+            {isTraining && <span style={{
+              fontSize: 11, background: 'var(--accent)', color: 'white',
+              padding: '2px 8px', borderRadius: 10, marginLeft: 8, animation: 'pulse 2s infinite',
+            }}>LIVE</span>}
+          </h2>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+            <select className="select" value={tail} onChange={e => setTail(Number(e.target.value))}
+              style={{ width: 120, height: 30, fontSize: 12 }}>
+              <option value={100}>100 dòng</option>
+              <option value={200}>200 dòng</option>
+              <option value={500}>500 dòng</option>
+              <option value={2000}>2000 dòng</option>
+              <option value={5000}>Full log</option>
+            </select>
+            <button className="btn btn-secondary btn-sm" onClick={() => loadLog()}>🔄</button>
+            <button className="btn btn-ghost btn-sm" onClick={onClose} style={{ fontSize: 18 }}>✕</button>
+          </div>
+        </div>
+
+        <pre ref={el => { logRef[0] = el; }} style={{
+          flex: 1, overflow: 'auto', background: '#0d1117', color: '#c9d1d9',
+          padding: 'var(--space-4)', borderRadius: 8, fontSize: 12, lineHeight: 1.6,
+          fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+          whiteSpace: 'pre-wrap', wordBreak: 'break-all', minHeight: 300, maxHeight: '60vh',
+          border: '1px solid rgba(99, 102, 241, 0.2)',
+        }}>
+          {loading ? <span style={{ color: '#8b949e' }}>⏳ Loading log...</span> : log}
+        </pre>
+
+        {isTraining && (
+          <div style={{
+            marginTop: 'var(--space-2)', fontSize: 11, color: 'var(--text-muted)',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <span className="spinner" style={{ width: 12, height: 12 }} />
+            Auto-refresh mỗi 3 giây...
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

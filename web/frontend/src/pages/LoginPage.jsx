@@ -42,8 +42,8 @@ export default function LoginPage() {
           <rect x="14" y="5" width="2" height="14" rx="1" fill="#6366f1" opacity="0.6"/>
           <rect x="18" y="8" width="2" height="8" rx="1" fill="#6366f1" opacity="0.4"/>
         </svg>
-        <h1>VieNeu TTS</h1>
-        <p>Vietnamese Text-to-Speech Platform</p>
+        <h1>OmniVoice Studio</h1>
+        <p>Thế hệ hệ thống tổng hợp giọng nói đa ngôn ngữ</p>
 
         <form onSubmit={handleSubmit}>
           {isRegister && (
@@ -53,7 +53,7 @@ export default function LoginPage() {
             </div>
           )}
           <div className="form-group">
-            <input className="input" type="email" placeholder="Email" value={email}
+            <input className="input" type="text" placeholder="Tên đăng nhập hoặc Email" value={email}
               onChange={e => setEmail(e.target.value)} required />
           </div>
           <div className="form-group">

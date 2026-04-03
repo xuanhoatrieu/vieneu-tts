@@ -29,6 +29,7 @@ AVAILABLE_MODELS = [
         "device": "cpu",
         "size_mb": 193,
         "description": "Nhẹ nhất, chạy CPU, tốc độ nhanh",
+        "engine": "standard",
     },
     {
         "repo": "pnnbao-ump/VieNeu-TTS-0.3B-q8-gguf",
@@ -38,6 +39,7 @@ AVAILABLE_MODELS = [
         "device": "cpu",
         "size_mb": 350,
         "description": "Chất lượng tốt hơn Q4, chạy CPU",
+        "engine": "standard",
     },
     {
         "repo": "pnnbao-ump/VieNeu-TTS-q4-gguf",
@@ -47,6 +49,7 @@ AVAILABLE_MODELS = [
         "device": "cpu",
         "size_mb": 398,
         "description": "Model lớn, quantize Q4, CPU",
+        "engine": "standard",
     },
     {
         "repo": "pnnbao-ump/VieNeu-TTS-q8-gguf",
@@ -56,6 +59,7 @@ AVAILABLE_MODELS = [
         "device": "cpu",
         "size_mb": 568,
         "description": "Model lớn, chất lượng cao, CPU",
+        "engine": "standard",
     },
     {
         "repo": "pnnbao-ump/VieNeu-TTS-0.3B",
@@ -66,6 +70,7 @@ AVAILABLE_MODELS = [
         "size_mb": 600,
         "vram_required_mb": 2000,
         "description": "Full precision, cần GPU, chất lượng tốt",
+        "engine": "standard",
     },
     {
         "repo": "pnnbao-ump/VieNeu-TTS",
@@ -76,6 +81,28 @@ AVAILABLE_MODELS = [
         "size_mb": 1100,
         "vram_required_mb": 3000,
         "description": "Chất lượng tốt nhất, cần GPU",
+        "engine": "standard",
+    },
+    {
+        "repo": "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF",
+        "name": "VieNeu v2 Turbo (CPU)",
+        "size": "v2",
+        "format": "GGUF",
+        "device": "cpu",
+        "size_mb": 900,
+        "description": "v2 Turbo — Zero-shot cloning, bilingual VI-EN, CPU",
+        "engine": "turbo",
+    },
+    {
+        "repo": "pnnbao-ump/VieNeu-TTS-v2-Turbo",
+        "name": "VieNeu v2 Turbo (GPU)",
+        "size": "v2",
+        "format": "Transformers",
+        "device": "gpu",
+        "size_mb": 2000,
+        "vram_required_mb": 4000,
+        "description": "v2 Turbo — Zero-shot cloning, bilingual VI-EN, GPU",
+        "engine": "turbo",
     },
 ]
 
@@ -123,6 +150,7 @@ class TTSService:
     _tts = None
     _initialized = False
     _current_model: str = ""
+    _engine: str = "standard"  # "standard" or "turbo"
     _is_loading: bool = False
     _loading_error: str = ""
     _lock = threading.Lock()
@@ -148,13 +176,29 @@ class TTSService:
         mode = settings.VIENEU_MODE
         t0 = _t.time()
 
-        # Determine device: GPU models → cuda:0, GGUF models → cpu
+        # Determine engine type and device from AVAILABLE_MODELS
         model_info = next((m for m in AVAILABLE_MODELS if m["repo"] == backbone_repo), None)
+        engine = model_info.get("engine", "standard") if model_info else "standard"
         is_gpu_model = model_info and model_info.get("device") == "gpu"
         device = "cuda:0" if is_gpu_model else "cpu"
-        print(f"🔄 Loading model: {backbone_repo} (mode={mode}, device={device})...")
+        print(f"🔄 Loading model: {backbone_repo} (engine={engine}, device={device})...")
 
-        if mode == "remote":
+        if engine == "turbo":
+            # v2-Turbo: use factory function with appropriate mode
+            if is_gpu_model:
+                from vieneu.turbo import TurboGPUVieNeuTTS
+                self._tts = TurboGPUVieNeuTTS(
+                    backbone_repo=backbone_repo,
+                    device=device,
+                )
+            else:
+                from vieneu.turbo import TurboVieNeuTTS
+                self._tts = TurboVieNeuTTS(
+                    backbone_repo=backbone_repo,
+                    device=device,
+                )
+            self._engine = "turbo"
+        elif mode == "remote":
             from vieneu.remote import RemoteVieNeuTTS
             init_kwargs = {}
             if hasattr(settings, "VIENEU_REMOTE_API_BASE"):
@@ -163,9 +207,11 @@ class TTSService:
                     settings, "VIENEU_REMOTE_MODEL", backbone_repo
                 )
             self._tts = RemoteVieNeuTTS(**init_kwargs)
+            self._engine = "standard"
         elif mode == "fast":
             from vieneu.fast import FastVieNeuTTS
             self._tts = FastVieNeuTTS()
+            self._engine = "standard"
         else:
             from vieneu.standard import VieNeuTTS
             self._tts = VieNeuTTS(
@@ -174,11 +220,12 @@ class TTSService:
                 codec_repo=settings.VIENEU_CODEC_REPO,
                 codec_device=device,
             )
+            self._engine = "standard"
 
         elapsed = _t.time() - t0
         self._current_model = backbone_repo
         self._initialized = True
-        print(f"🧠 VieNeu TTS loaded: {backbone_repo} on {device} in {elapsed:.1f}s (mode={mode})")
+        print(f"🧠 VieNeu TTS loaded: {backbone_repo} on {device} in {elapsed:.1f}s (engine={engine})")
 
     def switch_model(self, backbone_repo: str):
         """Switch to a different backbone model asynchronously."""
@@ -243,6 +290,7 @@ class TTSService:
         _, gpus = is_gpu_available(0)
         return {
             "current_model": self._current_model,
+            "current_engine": self._engine,
             "is_loading": self._is_loading,
             "is_initialized": self._initialized,
             "error": self._loading_error,
@@ -293,7 +341,13 @@ class TTSService:
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"{uuid.uuid4()}.wav")
 
-        audio = self.tts.infer(text=text, ref_audio=ref_audio_path, ref_text=ref_text or "")
+        if self._engine == "turbo":
+            # v2-Turbo: encode ref audio first, then infer with voice embedding
+            voice_data = self.tts.encode_reference(ref_audio_path)
+            audio = self.tts.infer(text=text, voice=voice_data)
+        else:
+            # v1 Standard: pass ref_audio + ref_text directly
+            audio = self.tts.infer(text=text, ref_audio=ref_audio_path, ref_text=ref_text or "")
         self.tts.save(audio, output_path)
 
         elapsed = time.time() - start
@@ -341,7 +395,12 @@ class TTSService:
 
         self._ensure_initialized()
 
-        # Need GPU model for LoRA — GGUF models don't support adapters
+        # LoRA requires v1 standard GPU model — v2-Turbo and GGUF don't support adapters
+        if self._engine == "turbo":
+            raise RuntimeError(
+                "v2-Turbo không hỗ trợ trained voice (LoRA). "
+                "Hệ thống sẽ tự chuyển sang model v1 GPU."
+            )
         if "gguf" in self._current_model.lower():
             raise RuntimeError(
                 "Trained voice cần model GPU (PyTorch). "
@@ -425,9 +484,13 @@ class TTSService:
         1. Wait for any model loading to complete
         2. If already on a compatible GPU model → done
         3. Otherwise → unload current model → load correct GPU model
+        Note: v2-Turbo does NOT support LoRA — always use v1 GPU models.
         """
         target = base_model_repo or "pnnbao-ump/VieNeu-TTS"
-        print(f"🔍 ensure_model: target={target}, current={self._current_model!r}, initialized={self._initialized}")
+        # v2-Turbo cannot be used for trained voices — force v1 GPU model
+        if "v2-Turbo" in (target or ""):
+            target = "pnnbao-ump/VieNeu-TTS"
+        print(f"🔍 ensure_model: target={target}, current={self._current_model!r}, engine={self._engine}, initialized={self._initialized}")
 
         # Step 1: Wait for any loading (startup, manual switch, etc.)
         waited = 0
@@ -437,11 +500,13 @@ class TTSService:
         if self._is_loading:
             return "Model đang được nạp quá lâu, vui lòng thử lại sau."
 
-        # Step 2: Check if we're already on a compatible GPU model
+        # Step 2: Check if we're already on the EXACT target GPU model
         if self._initialized and self._current_model:
-            if "gguf" not in self._current_model.lower():
-                print(f"✅ Already on GPU model: {self._current_model}")
-                return None  # Already on a GPU (PyTorch) model — LoRA compatible
+            if self._current_model == target:
+                print(f"✅ Already on correct GPU model: {self._current_model}")
+                return None  # Already on the exact model needed — LoRA compatible
+            elif "gguf" not in self._current_model.lower():
+                print(f"⚠️ On GPU model {self._current_model} but need {target}, switching...")
 
         # Step 3: Need to load the GPU model
         print(f"🔄 Auto-switching to {target} for trained voice...")
